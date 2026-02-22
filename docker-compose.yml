@@ -1,0 +1,20 @@
+services:
+  tts-backend:
+    build:
+      context: ./backend
+    container_name: 73bot-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  discord-bot:
+    build:
+      context: ./bot
+    container_name: 73bot-discord
+    depends_on:
+      - tts-backend
+    env_file:
+      - .env
+    restart: unless-stopped
