@@ -29,3 +29,6 @@ ENV/
 
 # docker
 .dockerignore
+
+# speaker_info
+coeiroink-v2/speaker_info/

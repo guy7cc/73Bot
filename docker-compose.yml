@@ -8,6 +8,8 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    depends_on:
+      - coeiroink
 
   discord-bot:
     build:
@@ -17,4 +19,16 @@ services:
       - tts-backend
     env_file:
       - .env
+    restart: unless-stopped
+
+  coeiroink:
+    build:
+      context: ./coeiroink-v2
+    container_name: coeiroink-v2
+    tty: true
+    ports:
+      - "50031:50031"
+      - "50021:50021" # Map both ports to be safe
+    volumes:
+      - ./coeiroink-v2/speaker_info:/opt/voicevox_engine/speaker_info
     restart: unless-stopped
