@@ -1,0 +1,12 @@
+services:
+  tts-backend:
+    volumes:
+      - ./backend:/app
+
+  discord-bot:
+    volumes:
+      - ./bot:/app
+
+  coeiroink:
+    volumes:
+      - ./coeiroink-v2/speaker_info:/opt/voicevox_engine/speaker_info
