@@ -5,6 +5,8 @@ services:
     container_name: 73bot-backend
     ports:
       - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
     restart: unless-stopped
@@ -28,5 +30,6 @@ services:
     tty: true
     ports:
       - "50031:50031"
+      - "50032:50031" # Documentation access
       - "50021:50021" # Map both ports to be safe
     restart: unless-stopped

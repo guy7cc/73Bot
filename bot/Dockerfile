@@ -2,9 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install ffmpeg for PyNaCl/discord.py voice support
+# Install ffmpeg, git and voice libraries for PyNaCl/discord.py/opus support
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg git libopus0 libsodium23 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
