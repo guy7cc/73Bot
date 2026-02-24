@@ -5,6 +5,7 @@ from discord.ext import commands
 import requests
 import signal
 import sys
+import json
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://tts-backend:8000")
@@ -20,6 +21,35 @@ if not discord.opus.is_loaded():
     except Exception as e:
         print(f"Warning: Failed to load Opus library: {e}")
 
+class UserSettings:
+    def __init__(self, filename="user_settings.json"):
+        self.filename = filename
+        self.settings = {}
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, "r", encoding="utf-8") as f:
+                    self.settings = json.load(f)
+            except Exception as e:
+                print(f"Error loading user settings: {e}")
+                self.settings = {}
+
+    def save(self):
+        try:
+            with open(self.filename, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving user settings: {e}")
+
+    def get_voice(self, user_id: int):
+        return self.settings.get(str(user_id))
+
+    def set_voice(self, user_id: int, voice_name: str):
+        self.settings[str(user_id)] = voice_name
+        self.save()
+
 class TTSBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -27,6 +57,7 @@ class TTSBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         # Dictionary to store {guild_id: text_channel_id} mapping for TTS monitoring
         self.monitored_channels = {}
+        self.user_settings = UserSettings()
 
     async def setup_hook(self):
         print(f"Opus loaded: {discord.opus.is_loaded()}")
@@ -38,8 +69,8 @@ class TTSBot(commands.Bot):
             print("Warning: PyNaCl (nacl) is NOT available. Voice connection will likely fail.")
 
         try:
-            await self.tree.sync()
-            print("Slash commands synced successfully.")
+            synced = await self.tree.sync()
+            print(f"Synced {len(synced)} slash commands successfully.")
         except Exception as e:
             print(f"Failed to sync slash commands: {e}")
 
@@ -116,6 +147,37 @@ async def status_command(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"ステータス取得エラー: {e}")
 
+@bot.tree.command(name="voice", description="読み上げに使用するあなたの個別のボイスを設定します")
+@discord.app_commands.describe(name="利用可能なボイス名を入力または選択してください")
+async def voice_command(interaction: discord.Interaction, name: str):
+    try:
+        # Retrieve available speakers from backend to validate
+        res = requests.get(f"{BACKEND_URL}/status", timeout=10)
+        res.raise_for_status()
+        speakers = res.json().get("speakers", [])
+        
+        if name not in speakers:
+            await interaction.response.send_message(f"エラー: '{name}' は利用可能なボイス一覧にありません。`/status` で確認してください。", ephemeral=True)
+            return
+            
+        bot.user_settings.set_voice(interaction.user.id, name)
+        await interaction.response.send_message(f"ボイスを `{name}` に設定しました！", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"エラーが発生しました: {e}", ephemeral=True)
+
+@voice_command.autocomplete("name")
+async def voice_autocomplete(interaction: discord.Interaction, current: str):
+    try:
+        res = requests.get(f"{BACKEND_URL}/status", timeout=5)
+        res.raise_for_status()
+        speakers = res.json().get("speakers", [])
+        return [
+            discord.app_commands.Choice(name=s, value=s)
+            for s in speakers if current.lower() in s.lower()
+        ][:25]
+    except Exception:
+        return []
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -132,13 +194,17 @@ async def on_message(message: discord.Message):
         if not text:
             return
 
-        def fetch_audio(t):
-            res = requests.post(f"{BACKEND_URL}/synthesize", json={"text": t}, timeout=30)
+        def fetch_audio(t, speaker_name=None):
+            payload = {"text": t}
+            if speaker_name:
+                payload["speaker"] = speaker_name
+            res = requests.post(f"{BACKEND_URL}/synthesize", json=payload, timeout=30)
             res.raise_for_status()
             return res.content
 
         try:
-            audio_data = await bot.loop.run_in_executor(None, fetch_audio, text)
+            speaker = bot.user_settings.get_voice(message.author.id)
+            audio_data = await bot.loop.run_in_executor(None, fetch_audio, text, speaker)
             
             filename = f"temp_{message.id}.wav"
             with open(filename, "wb") as f:

@@ -10,12 +10,58 @@ app = FastAPI(title="73Bot TTS Backend", version="1.2.0")
 
 COEIROINK_URL = os.getenv("COEIROINK_URL", "http://coeiroink:50031")
 COEIROINK_CONTAINER = os.getenv("COEIROINK_CONTAINER", "coeiroink-v2")
-# Default for "リリンちゃん" style "のーまる"
-SPEAKER_UUID = os.getenv("SPEAKER_UUID", "cb11bdbd-78fc-4f16-b528-a400bae1782d")
-STYLE_ID = int(os.getenv("STYLE_ID", "90"))
+# Default speaker name pattern: "SpeakerName (StyleName)"
+DEFAULT_SPEAKER_NAME = os.getenv("DEFAULT_SPEAKER_NAME", "リリンちゃん (のーまる)")
+
+class SpeakerManager:
+    def __init__(self, url: str):
+        self.url = url
+        self.styles = {} # "Name (Style)": id
+        self.default_id = 90 # Fallback safety
+
+    async def refresh(self):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(f"{self.url}/speakers")
+                res.raise_for_status()
+                speakers = res.json()
+                
+                new_styles = {}
+                for s in speakers:
+                    speaker_name = s.get("name")
+                    for style in s.get("styles", []):
+                        style_name = style.get("name")
+                        style_id = style.get("id")
+                        full_name = f"{speaker_name} ({style_name})"
+                        new_styles[full_name] = style_id
+                
+                if new_styles:
+                    self.styles = new_styles
+                    # Determine default
+                    if DEFAULT_SPEAKER_NAME in self.styles:
+                        self.default_id = self.styles[DEFAULT_SPEAKER_NAME]
+                    else:
+                        # Fallback to alphabetical first
+                        sorted_names = sorted(self.styles.keys())
+                        self.default_id = self.styles[sorted_names[0]]
+                    return True
+        except Exception as e:
+            print(f"Error refreshing speakers: {e}")
+        return False
+
+    def get_style_id(self, name: Optional[str] = None) -> int:
+        if name and name in self.styles:
+            return self.styles[name]
+        return self.default_id
+
+    def get_available_names(self) -> List[str]:
+        return sorted(self.styles.keys())
+
+speaker_manager = SpeakerManager(COEIROINK_URL)
 
 class SynthesizeRequest(BaseModel):
     text: str
+    speaker: Optional[str] = None
 
 async def get_speakers():
     try:
@@ -38,8 +84,11 @@ async def restart_coeiroink():
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    speakers = await get_speakers()
+    await speaker_manager.refresh()
+    speakers = speaker_manager.get_available_names()
     speaker_count = len(speakers)
+    current_default = [name for name, id in speaker_manager.styles.items() if id == speaker_manager.default_id]
+    default_name = current_default[0] if current_default else "Unknown"
     
     # Simple dashboard with rich aesthetics
     html_content = f"""
@@ -110,6 +159,22 @@ async def root():
                 padding: 12px;
                 border-radius: 8px;
                 font-size: 0.9rem;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }}
+            .speaker-item.default {{
+                border: 1px solid var(--accent);
+                background: rgba(56, 189, 248, 0.1);
+            }}
+            .speaker-item.default::after {{
+                content: 'DEFAULT';
+                font-size: 0.7rem;
+                font-weight: bold;
+                color: var(--accent);
+                background: rgba(56, 189, 248, 0.1);
+                padding: 2px 6px;
+                border-radius: 4px;
             }}
             .btn {{
                 background-color: var(--accent);
@@ -141,6 +206,7 @@ async def root():
                         <p><strong>Backend:</strong> <span style="color: var(--success)">Healthy</span></p>
                         <p><strong>COEIROINK:</strong> {COEIROINK_URL}</p>
                         <p><strong>Available Voices:</strong> {speaker_count}</p>
+                        <p><strong>Default Voice:</strong> <span style="color: var(--accent)">{default_name}</span></p>
                     </div>
                     <div>
                         <button onclick="restartCoeiroink()" class="btn btn-restart">Restart COEIROINK</button>
@@ -152,7 +218,7 @@ async def root():
             <div class="card">
                 <h2>Available Voice Speakers</h2>
                 <div class="speaker-list">
-                    {"".join([f'<div class="speaker-item">{s.get("name")}</div>' for s in speakers]) if speakers else "No speakers found."}
+                    {"".join([f'<div class="speaker-item {"default" if name == default_name else ""}">{name}</div>' for name in speakers]) if speakers else "No speakers found."}
                 </div>
             </div>
         </div>
@@ -186,13 +252,15 @@ async def root():
 
 @app.get("/status")
 async def status():
-    speakers = await get_speakers()
+    await speaker_manager.refresh()
+    speakers = speaker_manager.get_available_names()
     return {
         "status": "ok",
         "service": "73bot-tts-backend",
         "coeiroink_connection": "connected" if speakers else "failed",
         "speaker_count": len(speakers),
-        "speakers": [s.get("name") for s in speakers]
+        "speakers": speakers,
+        "default_speaker": next((name for name, id in speaker_manager.styles.items() if id == speaker_manager.default_id), None)
     }
 
 @app.post("/synthesize")
@@ -200,13 +268,16 @@ async def generate_audio(request: SynthesizeRequest):
     """
     Sends text to COEIROINK to generate speech audio and returns the WAV bytes.
     """
+    await speaker_manager.refresh()
     text = request.text
+    style_id = speaker_manager.get_style_id(request.speaker)
+    
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             # 1. Create audio query
             query_res = await client.post(
                 f"{COEIROINK_URL}/audio_query",
-                params={"text": text, "speaker": STYLE_ID}
+                params={"text": text, "speaker": style_id}
             )
             query_res.raise_for_status()
             query_data = query_res.json()
@@ -214,7 +285,7 @@ async def generate_audio(request: SynthesizeRequest):
             # 2. Synthesize audio
             synth_res = await client.post(
                 f"{COEIROINK_URL}/synthesis",
-                params={"speaker": STYLE_ID},
+                params={"speaker": style_id},
                 json=query_data,
                 headers={"Content-Type": "application/json"}
             )
