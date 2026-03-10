@@ -1,0 +1,8 @@
+services:
+  tts-backend:
+    volumes:
+      - ./backend:/app
+
+  discord-bot:
+    volumes:
+      - ./bot:/app

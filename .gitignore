@@ -29,3 +29,9 @@ ENV/
 
 # docker
 .dockerignore
+
+# speaker_info
+coeiroink-v2/speaker_info/
+
+# user settings
+bot/user_settings.json

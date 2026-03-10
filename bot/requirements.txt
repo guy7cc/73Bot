@@ -1,3 +1,4 @@
-discord.py[voice]
-python-dotenv
-httpx
+discord.py[voice] @ git+https://github.com/Rapptz/discord.py
+cryptography>=42.0.0
+requests==2.31.0
+python-dotenv==1.0.1
