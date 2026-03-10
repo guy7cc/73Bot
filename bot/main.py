@@ -6,6 +6,7 @@ import requests
 import signal
 import sys
 import json
+import io
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://tts-backend:8000")
@@ -58,6 +59,8 @@ class TTSBot(commands.Bot):
         # Dictionary to store {guild_id: text_channel_id} mapping for TTS monitoring
         self.monitored_channels = {}
         self.user_settings = UserSettings()
+        # Session for connection pooling to tts-backend
+        self.session = requests.Session()
 
     async def setup_hook(self):
         print(f"Opus loaded: {discord.opus.is_loaded()}")
@@ -179,6 +182,32 @@ async def voice_autocomplete(interaction: discord.Interaction, current: str):
         return []
 
 @bot.event
+async def on_voice_state_update(member, before, after):
+    """
+    Automatically leave the voice channel if the bot is the only human left.
+    """
+    voice_client = member.guild.voice_client
+    if not voice_client:
+        return
+
+    # Special case: If the bot itself moved channel or disconnected, check its new channel
+    # Usually we care about the channel the bot is currently in
+    channel = voice_client.channel
+    
+    # Check current membership in the bot's channel
+    # Filter to count non-bot humans
+    human_members = [m for m in channel.members if not m.bot]
+    
+    if len(human_members) == 0:
+        print(f"No humans left in {channel.name}. Auto-leaving...")
+        
+        # Clear monitoring for this guild
+        if member.guild.id in bot.monitored_channels:
+            del bot.monitored_channels[member.guild.id]
+            
+        await voice_client.disconnect()
+
+@bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
@@ -189,6 +218,12 @@ async def on_message(message: discord.Message):
         return
 
     voice_client = message.guild.voice_client
+    
+    # Wait briefly if the voice client just connected but isn't fully ready
+    if voice_client and not voice_client.is_connected():
+        await asyncio.sleep(0.5)
+        voice_client = message.guild.voice_client
+
     if voice_client and voice_client.is_connected():
         text = message.clean_content
         if not text:
@@ -198,7 +233,7 @@ async def on_message(message: discord.Message):
             payload = {"text": t}
             if speaker_name:
                 payload["speaker"] = speaker_name
-            res = requests.post(f"{BACKEND_URL}/synthesize", json=payload, timeout=30)
+            res = bot.session.post(f"{BACKEND_URL}/synthesize", json=payload, timeout=30)
             res.raise_for_status()
             return res.content
 
@@ -206,27 +241,24 @@ async def on_message(message: discord.Message):
             speaker = bot.user_settings.get_voice(message.author.id)
             audio_data = await bot.loop.run_in_executor(None, fetch_audio, text, speaker)
             
-            filename = f"temp_{message.id}.wav"
-            with open(filename, "wb") as f:
-                f.write(audio_data)
-
-            def after_play(error):
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except Exception as e:
-                    print(f"Failed to delete {filename}: {e}")
-                if error:
-                    print(f"Player error: {error}")
+            # Use BytesIO for in-memory audio instead of writing to disk
+            audio_buffer = io.BytesIO(audio_data)
 
             if voice_client.is_playing():
                 voice_client.stop()
                 
-            audio_source = discord.FFmpegPCMAudio(filename)
-            voice_client.play(audio_source, after=after_play)
+            # Play from buffer using pipe:True
+            audio_source = discord.FFmpegPCMAudio(audio_buffer, pipe=True)
+            voice_client.play(audio_source)
 
         except Exception as e:
             print(f"Error generating/playing TTS: {e}")
+    else:
+        # Logging for debugging why messages are skipped
+        if not voice_client:
+            pass # Normal case: bot not in voice
+        elif not voice_client.is_connected():
+            print(f"Message skipped: Voice client exists but is not connected (State: {voice_client.ws})")
 
 async def main():
     # Signal handler for graceful shutdown

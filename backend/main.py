@@ -21,30 +21,30 @@ class SpeakerManager:
 
     async def refresh(self):
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                res = await client.get(f"{self.url}/speakers")
-                res.raise_for_status()
-                speakers = res.json()
-                
-                new_styles = {}
-                for s in speakers:
-                    speaker_name = s.get("name")
-                    for style in s.get("styles", []):
-                        style_name = style.get("name")
-                        style_id = style.get("id")
-                        full_name = f"{speaker_name} ({style_name})"
-                        new_styles[full_name] = style_id
-                
-                if new_styles:
-                    self.styles = new_styles
-                    # Determine default
-                    if DEFAULT_SPEAKER_NAME in self.styles:
-                        self.default_id = self.styles[DEFAULT_SPEAKER_NAME]
-                    else:
-                        # Fallback to alphabetical first
-                        sorted_names = sorted(self.styles.keys())
-                        self.default_id = self.styles[sorted_names[0]]
-                    return True
+            client = get_http_client()
+            res = await client.get(f"{self.url}/speakers", timeout=5.0)
+            res.raise_for_status()
+            speakers = res.json()
+            
+            new_styles = {}
+            for s in speakers:
+                speaker_name = s.get("name")
+                for style in s.get("styles", []):
+                    style_name = style.get("name")
+                    style_id = style.get("id")
+                    full_name = f"{speaker_name} ({style_name})"
+                    new_styles[full_name] = style_id
+            
+            if new_styles:
+                self.styles = new_styles
+                # Determine default
+                if DEFAULT_SPEAKER_NAME in self.styles:
+                    self.default_id = self.styles[DEFAULT_SPEAKER_NAME]
+                else:
+                    # Fallback to alphabetical first
+                    sorted_names = sorted(self.styles.keys())
+                    self.default_id = self.styles[sorted_names[0]]
+                return True
         except Exception as e:
             print(f"Error refreshing speakers: {e}")
         return False
@@ -59,16 +59,30 @@ class SpeakerManager:
 
 speaker_manager = SpeakerManager(COEIROINK_URL)
 
+_http_client: Optional[httpx.AsyncClient] = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=30.0)
+    return _http_client
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global _http_client
+    if _http_client:
+        await _http_client.aclose()
+
 class SynthesizeRequest(BaseModel):
     text: str
     speaker: Optional[str] = None
 
 async def get_speakers():
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(f"{COEIROINK_URL}/speakers")
-            res.raise_for_status()
-            return res.json()
+        client = get_http_client()
+        res = await client.get(f"{COEIROINK_URL}/speakers", timeout=5.0)
+        res.raise_for_status()
+        return res.json()
     except Exception:
         return []
 
@@ -272,27 +286,29 @@ async def generate_audio(request: SynthesizeRequest):
     text = request.text
     style_id = speaker_manager.get_style_id(request.speaker)
     
+    style_id = speaker_manager.get_style_id(request.speaker)
+    
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # 1. Create audio query
-            query_res = await client.post(
-                f"{COEIROINK_URL}/audio_query",
-                params={"text": text, "speaker": style_id}
-            )
-            query_res.raise_for_status()
-            query_data = query_res.json()
+        client = get_http_client()
+        # 1. Create audio query
+        query_res = await client.post(
+            f"{COEIROINK_URL}/audio_query",
+            params={"text": text, "speaker": style_id}
+        )
+        query_res.raise_for_status()
+        query_data = query_res.json()
 
-            # 2. Synthesize audio
-            synth_res = await client.post(
-                f"{COEIROINK_URL}/synthesis",
-                params={"speaker": style_id},
-                json=query_data,
-                headers={"Content-Type": "application/json"}
-            )
-            synth_res.raise_for_status()
-            
-            # Return WAV data
-            return Response(content=synth_res.content, media_type="audio/wav")
+        # 2. Synthesize audio
+        synth_res = await client.post(
+            f"{COEIROINK_URL}/synthesis",
+            params={"speaker": style_id},
+            json=query_data,
+            headers={"Content-Type": "application/json"}
+        )
+        synth_res.raise_for_status()
+        
+        # Return WAV data
+        return Response(content=synth_res.content, media_type="audio/wav")
             
     except httpx.RequestError as exc:
         raise HTTPException(status_code=500, detail=f"Request to COEIROINK API failed: {exc}")
